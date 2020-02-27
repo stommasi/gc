@@ -8,22 +8,24 @@
 
 #define BUFSIZE 4096
 
-void zero(void *p, int n)
-{
-	while (n--) {
-		*(char *)p++ = 0;
-	}
-}
+struct gopherdata {
+	char type;
+	char *display;
+	char *selector;
+	char *host;
+	char *port;
+	struct gopherdata *next;
+};
 
-int main()
+int 
+getconn()
 {
 	char *host = "quux.org";
 	char *port = "70";
 	int sock;
-	char buf[BUFSIZE];
 	struct addrinfo hints, *server, *aip;
 
-	zero(&hints, sizeof(hints));
+	memset(&hints, 0, sizeof hints);
 
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
@@ -52,7 +54,16 @@ int main()
 
 	freeaddrinfo(server);
 
-	if (send(sock, "\r\n", 2, 0) < 0) {
+	return sock;
+}
+
+int 
+getdata(
+	int sock,
+	char *buf,
+	const char *request)
+{
+	if (send(sock, request, strlen(request), 0) < 0) {
 		fprintf(stderr, "can't send\n");
 		return 1;
 	}
@@ -65,46 +76,101 @@ int main()
 
 	buf[tbytes] = '\0';
 
+	return tbytes;
+}
+
+struct gopherdata *
+parsedata(
+	char *buf,
+	int tbytes)
+{
 	int c = 0; /* character */
 	int f = 0; /* field */
-	int r = 0; /* record */
-	char *page[100][4] = {0};
-	for (char *p = buf; tbytes > 0; tbytes--) {
-		if (*p == '\t' || *p == '\r') {
+
+	struct gopherdata *gd = malloc(sizeof (struct gopherdata));
+	struct gopherdata *gdp = gd;
+
+	for (char *bufp = buf; tbytes > 0; tbytes--) {
+		if (f == 0) {
+			gdp->type = *bufp;
+			++f;
+		} else if (*bufp == '\t' || *bufp == '\r') {
 			char *str = malloc(c + 1);
-			strncpy(str, p - c, c);
+			strncpy(str, bufp - c, c);
 			*(str + (c + 1)) = '\0';
-			page[r][f++] = str;
+			switch (f) {
+			case 1:
+				gdp->display = str;
+				break;
+			case 2:
+				gdp->selector = str;
+				break;
+			case 3:
+				gdp->host = str;
+				break;
+			case 4:
+				gdp->port = str;
+				break;
+			}
+			++f;
 			c = 0;
-		} else if (*p == '\n') {
+		} else if (*bufp == '\n') {
 			c = 0;
 			f = 0;
-			r++;
+			gdp->next = malloc(sizeof (struct gopherdata));
+			gdp = gdp->next;
 		} else {
-			c++;
+			++c;
 		}
-		p++;
+		++bufp;
 	}
 
+	gdp->next = NULL;
+
+	return gd;
+}
+
+void
+displaypage(
+	struct gopherdata *gd)
+{
 	char *output = malloc(4096);
-	int oi = 0;
-	for (int i = 0; i < r; i++) {
-		char type = page[i][0][0];
-		char *display = &page[i][0][1];
+	char *op = output;
+	int menuitem = 0;
+	struct gopherdata *gdp;
+
+	for (gdp = gd; gdp != NULL; gdp = gdp->next) {
+		char type = gdp->type;
+		char *display = gdp->display;
 		switch (type) {
 		case 'i':
-			oi += sprintf(output + oi, "%s\n", display);
+			op += sprintf(op, "%s\n", display);
 			break;
 		case '0':
-			oi += sprintf(output + oi, "[F] %s\n", display);
+			op += sprintf(op, "[%d]%s\n", ++menuitem, display);
 			break;
 		case '1':
-			oi += sprintf(output + oi, "[D] %s\n", display);
+			op += sprintf(op, "[%d]%s\n", ++menuitem, display);
 			break;
 		}
 	}
 
-	write(1, output, oi);
+	write(1, output, op - output);
+
+	free(output);
+}
+
+int 
+main()
+{
+	char buf[BUFSIZE];
+	int sock = getconn();
+
+	int tbytes = getdata(sock, buf, "\r\n");
+
+	struct gopherdata *gd = parsedata(buf, tbytes);
+
+	displaypage(gd);
 
 	close(sock);
 
