@@ -1,12 +1,19 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <termios.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netdb.h>
 #include <assert.h>
 #include <string.h>
+#include <ctype.h>
 
-#define BUFSIZE 4096
+#define BUFSIZE 32768
+
+typedef enum {
+	false,
+	true
+} bool;
 
 struct gopherdata {
 	char type;
@@ -14,14 +21,20 @@ struct gopherdata {
 	char *selector;
 	char *host;
 	char *port;
+	int menuindex;
 	struct gopherdata *next;
 };
 
+struct pagestack {
+	struct gopherdata **pages;
+	int top;
+};
+
 int 
-getconn()
+getconn(
+	char *host,
+	char *port)
 {
-	char *host = "quux.org";
-	char *port = "70";
 	int sock;
 	struct addrinfo hints, *server, *aip;
 
@@ -61,9 +74,12 @@ int
 getdata(
 	int sock,
 	char *buf,
-	const char *request)
+	char *request)
 {
-	if (send(sock, request, strlen(request), 0) < 0) {
+	char reqstr[strlen(request) + 2];
+	strcpy(reqstr, request);
+	strcat(reqstr, "\r\n");
+	if (send(sock, reqstr, strlen(reqstr), 0) < 0) {
 		fprintf(stderr, "can't send\n");
 		return 1;
 	}
@@ -86,18 +102,24 @@ parsedata(
 {
 	int c = 0; /* character */
 	int f = 0; /* field */
+	int menuindex = 0;
 
-	struct gopherdata *gd = malloc(sizeof (struct gopherdata));
+	struct gopherdata *gd = (struct gopherdata *)malloc(sizeof (struct gopherdata));
 	struct gopherdata *gdp = gd;
 
-	for (char *bufp = buf; tbytes > 0; tbytes--) {
+	for (char *bufp = buf; tbytes > 1; tbytes--) {
 		if (f == 0) {
 			gdp->type = *bufp;
+			if (gdp->type == '0' || gdp->type == '1') {
+				gdp->menuindex = ++menuindex;
+			} else {
+				gdp->menuindex = 0;
+			}
 			++f;
 		} else if (*bufp == '\t' || *bufp == '\r') {
-			char *str = malloc(c + 1);
+			char *str = (char *)malloc((c + 1) * sizeof(char));
 			strncpy(str, bufp - c, c);
-			*(str + (c + 1)) = '\0';
+			*(str + c) = '\0';
 			switch (f) {
 			case 1:
 				gdp->display = str;
@@ -117,7 +139,7 @@ parsedata(
 		} else if (*bufp == '\n') {
 			c = 0;
 			f = 0;
-			gdp->next = malloc(sizeof (struct gopherdata));
+			gdp->next = (struct gopherdata *)malloc(sizeof (struct gopherdata));
 			gdp = gdp->next;
 		} else {
 			++c;
@@ -125,16 +147,22 @@ parsedata(
 		++bufp;
 	}
 
+/* This was causing a segmentation fault for emtpy pages, because gdp->next is
+ * not set when the selector does not exist. */
+#if 0
+	free(gdp->next);
+#endif
+
 	gdp->next = NULL;
 
 	return gd;
 }
 
-void
-displaypage(
-	struct gopherdata *gd)
+int
+formatpage(
+	struct gopherdata *gd,
+	char *output)
 {
-	char *output = malloc(4096);
 	char *op = output;
 	int menuitem = 0;
 	struct gopherdata *gdp;
@@ -150,29 +178,113 @@ displaypage(
 			op += sprintf(op, "[%d]%s\n", ++menuitem, display);
 			break;
 		case '1':
-			op += sprintf(op, "[%d]%s\n", ++menuitem, display);
+			op += sprintf(op, "[%d]%s/\n", ++menuitem, display);
+			break;
+		default:
 			break;
 		}
 	}
 
-	write(1, output, op - output);
+	op += sprintf(op, "\n:");
 
-	free(output);
+	return (op - output);
 }
 
 int 
 main()
 {
 	char buf[BUFSIZE];
-	int sock = getconn();
+	struct gopherdata *gd = NULL;
+	struct pagestack stack;
+	stack.pages = (struct gopherdata **)malloc(100 * sizeof(struct gopherdata *));
+	stack.top = 0;
 
-	int tbytes = getdata(sock, buf, "\r\n");
+	char type = '1';
+	char *selector = "\0";
+	char *host = "quux.org";
+	char *port = "70";
+	char c = 0;
 
-	struct gopherdata *gd = parsedata(buf, tbytes);
+	struct termios origterm, rawterm;
 
-	displaypage(gd);
+	if (tcgetattr(0, &origterm) == -1)
+		exit(1);
 
-	close(sock);
+	rawterm = origterm;
+
+	rawterm.c_lflag &= ~ICANON;
+	rawterm.c_lflag &= ECHO;
+	rawterm.c_cc[VMIN] = 1;
+	rawterm.c_cc[VTIME] = 0;
+
+	if (tcsetattr(0, TCSAFLUSH, &rawterm) == -1)
+		exit(1);
+
+	char *output = (char *)malloc(32768);
+	bool running = true;
+
+	while (running) {
+		int menui = 0;
+		int tbytes;
+
+		if (selector) {
+			int sock = getconn(host, port);
+			tbytes = getdata(sock, buf, selector);
+			close(sock);
+			gd = parsedata(buf, tbytes);
+			*(stack.pages + stack.top) = gd;
+			++stack.top;
+		} else {
+			--stack.top;
+			gd = *(stack.pages + (stack.top - 1));
+		}
+
+		if (type == '1') {
+			tbytes = formatpage(gd, output);
+		} else {
+			output = buf;
+		}
+
+		write(1, "\n", 1);
+		write(1, output, tbytes);
+
+		read(0, &c, 1);
+
+		if (c == 'u') {
+			selector = NULL;
+			type = '1';
+			continue;
+		} else if (c == 'q') {
+			write(1, "\n", 1);
+			running = false;
+			continue;
+		} else if (c >= 48 && c <= 57) {
+			while (c != '\n') {
+				if (c >= 48 && c <= 57) {
+					menui = (menui * 10) + (c - 48);
+				} else {
+					menui = 0;
+					break;
+				}
+				read(0, &c, 1);
+			}
+		}
+
+		if (menui) {
+			for (struct gopherdata *gdp = gd; gdp != NULL; gdp = gdp->next) {
+				if (menui == gdp->menuindex) {
+					type = gdp->type;
+					selector = gdp->selector;
+					host = gdp->host;
+					port = gdp->port;
+					break;
+				}
+			}
+		}
+	}
+
+	if (tcsetattr(0, TCSAFLUSH, &origterm) == -1)
+		exit(1);
 
 	return 0;
 }
