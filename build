@@ -1,1 +1,1 @@
-gcc -g -Wall -Wextra -o gopher gopher.c
+gcc -g -Wall -Wextra -o gc gc.c

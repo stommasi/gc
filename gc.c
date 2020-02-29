@@ -8,7 +8,7 @@
 #include <string.h>
 #include <ctype.h>
 
-#define BUFSIZE 32768
+#define BUFSIZE 1024 * 1024
 
 typedef enum {
 	false,
@@ -175,10 +175,10 @@ formatpage(
 			op += sprintf(op, "%s\n", display);
 			break;
 		case '0':
-			op += sprintf(op, "[%d]%s\n", ++menuitem, display);
+			op += sprintf(op, "(%d) %s\n", ++menuitem, display);
 			break;
 		case '1':
-			op += sprintf(op, "[%d]%s/\n", ++menuitem, display);
+			op += sprintf(op, "(%d) %s/\n", ++menuitem, display);
 			break;
 		default:
 			break;
@@ -193,7 +193,7 @@ formatpage(
 int 
 main()
 {
-	char buf[BUFSIZE];
+	char *buf = (char *)malloc(BUFSIZE);
 	struct gopherdata *gd = NULL;
 	struct pagestack stack;
 	stack.pages = (struct gopherdata **)malloc(100 * sizeof(struct gopherdata *));
@@ -220,55 +220,12 @@ main()
 	if (tcsetattr(0, TCSAFLUSH, &rawterm) == -1)
 		exit(1);
 
-	char *output = (char *)malloc(32768);
 	bool running = true;
 
+	int menui = 0;
 	while (running) {
-		int menui = 0;
+		char *output = (char *)malloc(32768);
 		int tbytes;
-
-		if (selector) {
-			int sock = getconn(host, port);
-			tbytes = getdata(sock, buf, selector);
-			close(sock);
-			gd = parsedata(buf, tbytes);
-			*(stack.pages + stack.top) = gd;
-			++stack.top;
-		} else {
-			--stack.top;
-			gd = *(stack.pages + (stack.top - 1));
-		}
-
-		if (type == '1') {
-			tbytes = formatpage(gd, output);
-		} else {
-			output = buf;
-		}
-
-		write(1, "\n", 1);
-		write(1, output, tbytes);
-
-		read(0, &c, 1);
-
-		if (c == 'u') {
-			selector = NULL;
-			type = '1';
-			continue;
-		} else if (c == 'q') {
-			write(1, "\n", 1);
-			running = false;
-			continue;
-		} else if (c >= 48 && c <= 57) {
-			while (c != '\n') {
-				if (c >= 48 && c <= 57) {
-					menui = (menui * 10) + (c - 48);
-				} else {
-					menui = 0;
-					break;
-				}
-				read(0, &c, 1);
-			}
-		}
 
 		if (menui) {
 			for (struct gopherdata *gdp = gd; gdp != NULL; gdp = gdp->next) {
@@ -279,6 +236,60 @@ main()
 					port = gdp->port;
 					break;
 				}
+			}
+		}
+
+		if (type == '1') {
+			if (selector) {
+				int sock = getconn(host, port);
+				tbytes = getdata(sock, buf, selector);
+				close(sock);
+				gd = parsedata(buf, tbytes);
+				*(stack.pages + stack.top) = gd;
+				++stack.top;
+			} else {
+				--stack.top;
+				gd = *(stack.pages + (stack.top - 1));
+			}
+			tbytes = formatpage(gd, output);
+		} else if (type == '0') {
+			int sock = getconn(host, port);
+			tbytes = getdata(sock, buf, selector);
+			close(sock);
+			output = buf;
+		}
+
+		char *op = output;
+		while (tbytes >= 0) {
+			write(1, op, 1000);
+			op += 1000;
+			tbytes -= 1000;
+
+			read(0, &c, 1);
+
+			if (c == 'u') {
+				menui = 0;
+				selector = NULL;
+				type = '1';
+				break;
+			} else if (c == 'q') {
+				write(1, "\n", 1);
+				running = false;
+				break;
+			} else if (c >= 48 && c <= 57) {
+				menui = 0;
+				while (c != '\n') {
+					if (c >= 48 && c <= 57) {
+						menui = (menui * 10) + (c - 48);
+					} else {
+						menui = 0;
+						break;
+					}
+					read(0, &c, 1);
+				}
+				if (menui) break;
+			} else if (c == 'm') {
+				continue;
 			}
 		}
 	}
