@@ -186,9 +186,21 @@ formatpage(
 		}
 	}
 
-	outbuf->p += sprintf(outbuf->p, "\n:");
-
+	outbuf->p += sprintf(outbuf->p, "\n");
 	outbuf->nbytes = outbuf->p - outbuf->data;
+	outbuf->p = outbuf->data;
+}
+
+void
+printbuffer(
+	struct buffer *outbuf)
+{
+	int max = 1000;
+	int rem = outbuf->nbytes - (outbuf->p - outbuf->data);
+
+	if (rem <= outbuf->nbytes) {
+		outbuf->p += write(1, outbuf->p, (rem < max) ? rem : max);
+	}
 }
 
 int 
@@ -220,11 +232,11 @@ main()
 
 	rawterm = origterm;
 
-	rawterm.c_lflag &= ~ICANON;
-	rawterm.c_lflag |= ECHO;
-	rawterm.c_iflag |= IGNBRK;
-	rawterm.c_cc[VMIN] = 1;
-	rawterm.c_cc[VTIME] = 0;
+	rawterm.c_lflag &= ~ICANON; /* don't wait for newline to process input */
+	rawterm.c_lflag &= ~ECHO;
+	rawterm.c_iflag |= IGNBRK; /* leave ctrl-c to the terminal/debugger */
+	rawterm.c_cc[VMIN] = 1; /* wait for one character */
+	rawterm.c_cc[VTIME] = 0; /* don't timeout */
 
 	if (tcsetattr(0, TCSAFLUSH, &rawterm) == -1)
 		exit(1);
@@ -233,7 +245,6 @@ main()
 
 	int menui = 0;
 	while (running) {
-
 		if (menui) {
 			for (struct gopherdata *gdp = gd; gdp != NULL; gdp = gdp->next) {
 				if (menui == gdp->menuindex) {
@@ -267,39 +278,40 @@ main()
 			close(sock);
 			outbuf.data = inbuf.data;
 			outbuf.nbytes = inbuf.nbytes;
+			outbuf.p = outbuf.data;
 		}
 
-		outbuf.p = outbuf.data;
-		while (outbuf.p - outbuf.data < outbuf.nbytes) {
-			int nbytes = write(1, outbuf.p, outbuf.nbytes);
-			outbuf.p += nbytes;
+		write(1, "\n", 1);
+		printbuffer(&outbuf);
 
-			read(0, &c, 1);
-
+		while (read(0, &c, 1)) {
 			if (c == 'u') {
 				menui = 0;
 				selector = NULL;
 				type = '1';
-				break;
 			} else if (c == 'q') {
 				write(1, "\n", 1);
 				running = false;
-				break;
 			} else if (c >= 48 && c <= 57) {
 				menui = 0;
+				write(1, "Select: ", 8);
 				while (c != '\n') {
 					if (c >= 48 && c <= 57) {
 						menui = (menui * 10) + (c - 48);
-					} else {
-						menui = 0;
-						break;
+						write(1, &c, 1);
+					} else if (c == 127) { /* backspace */
+						write(1, "\x1b[D\x1b[0K", 7); /* back and erase */
+						menui /= 10; /* remove the last digit */
 					}
 					read(0, &c, 1);
 				}
-				if (menui) break;
-			} else if (c == 'm') {
+			} else if (c == ' ') {
+				menui = 0;
+				type = 0;
+			} else {
 				continue;
 			}
+			break;
 		}
 	}
 
