@@ -30,6 +30,12 @@ struct pagestack {
 	int top;
 };
 
+struct buffer {
+	char *data;
+	char *p;
+	int nbytes;
+};
+
 int 
 getconn(
 	char *host,
@@ -70,10 +76,10 @@ getconn(
 	return sock;
 }
 
-int 
+void
 getdata(
 	int sock,
-	char *buf,
+	struct buffer *inbuf,
 	char *request)
 {
 	char reqstr[strlen(request) + 2];
@@ -81,24 +87,20 @@ getdata(
 	strcat(reqstr, "\r\n");
 	if (send(sock, reqstr, strlen(reqstr), 0) < 0) {
 		fprintf(stderr, "can't send\n");
-		return 1;
 	}
 
+	inbuf->nbytes = 0;
 	int nbytes;
-	int tbytes = 0;
-	while ((nbytes = recv(sock, buf + tbytes, BUFSIZE - 1, 0)) > 0) {
-		tbytes += nbytes;
+	while ((nbytes = recv(sock, inbuf->data + inbuf->nbytes, BUFSIZE - 1, 0)) > 0) {
+		inbuf->nbytes += nbytes;
 	}
 
-	buf[tbytes] = '\0';
-
-	return tbytes;
+	*(inbuf->data + inbuf->nbytes) = '\0';
 }
 
 struct gopherdata *
 parsedata(
-	char *buf,
-	int tbytes)
+	struct buffer *inbuf)
 {
 	int c = 0; /* character */
 	int f = 0; /* field */
@@ -107,18 +109,18 @@ parsedata(
 	struct gopherdata *gd = (struct gopherdata *)malloc(sizeof (struct gopherdata));
 	struct gopherdata *gdp = gd;
 
-	for (char *bufp = buf; tbytes > 1; tbytes--) {
+	for (inbuf->p = inbuf->data; inbuf->p - inbuf->data < inbuf->nbytes; inbuf->p++) {
 		if (f == 0) {
-			gdp->type = *bufp;
+			gdp->type = *inbuf->p;
 			if (gdp->type == '0' || gdp->type == '1') {
 				gdp->menuindex = ++menuindex;
 			} else {
 				gdp->menuindex = 0;
 			}
 			++f;
-		} else if (*bufp == '\t' || *bufp == '\r') {
+		} else if (*inbuf->p == '\t' || *inbuf->p == '\r') {
 			char *str = (char *)malloc((c + 1) * sizeof(char));
-			strncpy(str, bufp - c, c);
+			strncpy(str, inbuf->p - c, c);
 			*(str + c) = '\0';
 			switch (f) {
 			case 1:
@@ -136,7 +138,7 @@ parsedata(
 			}
 			++f;
 			c = 0;
-		} else if (*bufp == '\n') {
+		} else if (*inbuf->p == '\n') {
 			c = 0;
 			f = 0;
 			gdp->next = (struct gopherdata *)malloc(sizeof (struct gopherdata));
@@ -144,7 +146,6 @@ parsedata(
 		} else {
 			++c;
 		}
-		++bufp;
 	}
 
 /* This was causing a segmentation fault for emtpy pages, because gdp->next is
@@ -158,12 +159,12 @@ parsedata(
 	return gd;
 }
 
-int
+void
 formatpage(
 	struct gopherdata *gd,
-	char *output)
+	struct buffer *outbuf)
 {
-	char *op = output;
+	outbuf->p = outbuf->data;
 	int menuitem = 0;
 	struct gopherdata *gdp;
 
@@ -172,28 +173,35 @@ formatpage(
 		char *display = gdp->display;
 		switch (type) {
 		case 'i':
-			op += sprintf(op, "%s\n", display);
+			outbuf->p += sprintf(outbuf->p, "%s\n", display);
 			break;
 		case '0':
-			op += sprintf(op, "(%d) %s\n", ++menuitem, display);
+			outbuf->p += sprintf(outbuf->p, "(%d) %s\n", ++menuitem, display);
 			break;
 		case '1':
-			op += sprintf(op, "(%d) %s/\n", ++menuitem, display);
+			outbuf->p += sprintf(outbuf->p, "(%d) %s/\n", ++menuitem, display);
 			break;
 		default:
 			break;
 		}
 	}
 
-	op += sprintf(op, "\n:");
+	outbuf->p += sprintf(outbuf->p, "\n:");
 
-	return (op - output);
+	outbuf->nbytes = outbuf->p - outbuf->data;
 }
 
 int 
 main()
 {
-	char *buf = (char *)malloc(BUFSIZE);
+	struct buffer inbuf;
+	inbuf.data = (char *)malloc(BUFSIZE);
+	inbuf.nbytes = 0;
+
+	struct buffer outbuf;
+	outbuf.data = (char *)malloc(BUFSIZE);
+	outbuf.nbytes = 0;
+
 	struct gopherdata *gd = NULL;
 	struct pagestack stack;
 	stack.pages = (struct gopherdata **)malloc(100 * sizeof(struct gopherdata *));
@@ -213,7 +221,8 @@ main()
 	rawterm = origterm;
 
 	rawterm.c_lflag &= ~ICANON;
-	rawterm.c_lflag &= ECHO;
+	rawterm.c_lflag |= ECHO;
+	rawterm.c_iflag |= IGNBRK;
 	rawterm.c_cc[VMIN] = 1;
 	rawterm.c_cc[VTIME] = 0;
 
@@ -224,8 +233,6 @@ main()
 
 	int menui = 0;
 	while (running) {
-		char *output = (char *)malloc(32768);
-		int tbytes;
 
 		if (menui) {
 			for (struct gopherdata *gdp = gd; gdp != NULL; gdp = gdp->next) {
@@ -242,28 +249,30 @@ main()
 		if (type == '1') {
 			if (selector) {
 				int sock = getconn(host, port);
-				tbytes = getdata(sock, buf, selector);
+				getdata(sock, &inbuf, selector);
 				close(sock);
-				gd = parsedata(buf, tbytes);
+				gd = parsedata(&inbuf);
 				*(stack.pages + stack.top) = gd;
 				++stack.top;
 			} else {
-				--stack.top;
-				gd = *(stack.pages + (stack.top - 1));
+				if (stack.top > 1) {
+					--stack.top;
+					gd = *(stack.pages + (stack.top - 1));
+				}
 			}
-			tbytes = formatpage(gd, output);
+			formatpage(gd, &outbuf);
 		} else if (type == '0') {
 			int sock = getconn(host, port);
-			tbytes = getdata(sock, buf, selector);
+			getdata(sock, &inbuf, selector);
 			close(sock);
-			output = buf;
+			outbuf.data = inbuf.data;
+			outbuf.nbytes = inbuf.nbytes;
 		}
 
-		char *op = output;
-		while (tbytes >= 0) {
-			write(1, op, 1000);
-			op += 1000;
-			tbytes -= 1000;
+		outbuf.p = outbuf.data;
+		while (outbuf.p - outbuf.data < outbuf.nbytes) {
+			int nbytes = write(1, outbuf.p, outbuf.nbytes);
+			outbuf.p += nbytes;
 
 			read(0, &c, 1);
 
