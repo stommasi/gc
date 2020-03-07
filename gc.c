@@ -1,12 +1,14 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <termios.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <netdb.h>
-#include <assert.h>
 #include <string.h>
 #include <ctype.h>
+
+#include <termios.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+
+#include <sys/socket.h>
+#include <netdb.h>
 
 #define BUFSIZE 1024 * 1024
 
@@ -148,12 +150,6 @@ parsedata(
 		}
 	}
 
-/* This was causing a segmentation fault for emtpy pages, because gdp->next is
- * not set when the selector does not exist. */
-#if 0
-	free(gdp->next);
-#endif
-
 	gdp->next = NULL;
 
 	return gd;
@@ -195,11 +191,33 @@ void
 printbuffer(
 	struct buffer *outbuf)
 {
-	int max = 1000;
+	struct winsize ws;
+	ioctl(1, TIOCGWINSZ, &ws); /* get terminal rows and columns */
+
+	int row = 0;
+	int col = 0;
+	int max = 0;
+
+	/* Count bytes (max) in 5 less than a screen's worth of rows */
+	while (row < ws.ws_row - 5) {
+		if (*(outbuf->p + max) == '\n' || col == ws.ws_col) {
+			row++;
+			col = 0;
+		}
+		max++;
+		col++;
+	}
+
+	/* Bytes remaining in document */
 	int rem = outbuf->nbytes - (outbuf->p - outbuf->data);
 
-	if (rem <= outbuf->nbytes) {
-		outbuf->p += write(1, outbuf->p, (rem < max) ? rem : max);
+	outbuf->p += write(1, outbuf->p, (rem < max) ? rem : max);
+
+	rem = outbuf->nbytes - (outbuf->p - outbuf->data);
+	if (rem > 0) {
+		printf(
+			"\n--MORE (%.1f%% remaining)--\n",
+			((float)rem / (float)outbuf->nbytes) * 100);
 	}
 }
 
